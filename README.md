@@ -1,3 +1,5 @@
+![release](https://github.com/subconscious-labs/deepseek-mcp/actions/workflows/release.yml/badge.svg)
+
 # deepseek-mcp
 
 MCP server exposing [DeepSeek Search and Fetch](https://api.deepseek.com) as tools for any MCP client — Claude Desktop, subconscious-core, Continue, Zed, Codex, or your own.
