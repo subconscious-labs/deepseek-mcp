@@ -9,8 +9,9 @@ import (
 )
 
 type Config struct {
-    APIKey      string `envconfig:"DEEPSEEK_API_KEY" required:"true"`
-    APIBase     string `envconfig:"DEEPSEEK_API_BASE" default:"https://api.deepseek.com"`
+	APIKey      string `envconfig:"DEEPSEEK_API_KEY"`
+	APIBase     string `envconfig:"DEEPSEEK_API_BASE" default:"https://api.deepseek.com"`
+
     Transport   string `envconfig:"MCP_TRANSPORT" default:"stdio"`
     HTTPAddr    string `envconfig:"MCP_HTTP_ADDR" default:":8765"`
     HTTPToken   string `envconfig:"MCP_HTTP_TOKEN"`
@@ -76,15 +77,22 @@ func Load() (Config, error) {
         cfg.StateDir = defaultStateDir()
     }
 
-    // Post-validation
-    if cfg.SearchDefaultCount < 1 || cfg.SearchDefaultCount > cfg.SearchMaxCount {
-        return cfg, fmt.Errorf("search-default-count must be between 1 and %d", cfg.SearchMaxCount)
-    }
-    if cfg.Transport != "stdio" && cfg.Transport != "http" {
-        return cfg, fmt.Errorf("transport must be stdio or http")
-    }
+	// Post-validation
+	if cfg.SearchDefaultCount < 1 || cfg.SearchDefaultCount > cfg.SearchMaxCount {
+		return cfg, fmt.Errorf("search-default-count must be between 1 and %d", cfg.SearchMaxCount)
+	}
+	if cfg.Transport != "stdio" && cfg.Transport != "http" {
+		return cfg, fmt.Errorf("transport must be stdio or http")
+	}
 
-    return cfg, nil
+	// APIKey нужен только для реального запуска. Информационные
+	// режимы (--version, --check, --print-mcp-config) работают без него.
+	informational := cfg.Check || cfg.PrintVersion || cfg.PrintMCPConfig
+	if !informational && cfg.APIKey == "" {
+		return cfg, fmt.Errorf("DEEPSEEK_API_KEY is required (or pass --deepseek-api-key)")
+	}
+
+	return cfg, nil
 }
 
 func defaultStateDir() string {

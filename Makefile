@@ -1,5 +1,5 @@
 .PHONY: build clean run install test test-race vet lint fmt tidy bench ci check \
-        cover cover-html cover-check e2e docker release tools print-mcp-config
+        cover cover-html cover-check e2e docker release tools print-mcp-config e2e conformance
 
 # --- Configuration ---
 GIT_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -83,16 +83,16 @@ cover-check: cover
 
 # --- Integration / E2E ---
 
-# Integration-тесты с mock DeepSeek — всегда.
-integration:
-	go test -race ./test/integration/...
-
 # E2E — бьют по реальному API, стоят денег. Запускать вручную.
-e2e:
+e2e: build
 	@if [ -z "$$DEEPSEEK_API_KEY" ]; then \
 		echo "DEEPSEEK_API_KEY not set"; exit 1; \
 	fi
 	DEEPSEEK_E2E=1 go test -v -count=1 ./test/e2e/...
+
+# Conformance — wire-level MCP-протокол, без сети и без внешних CLI.
+conformance: build
+	go test -v -count=1 ./test/conformance/...
 
 # --- Distribution ---
 
