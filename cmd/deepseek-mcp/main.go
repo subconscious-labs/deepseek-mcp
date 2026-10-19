@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/subconscious-labs/deepseek-mcp/internal/config"
+	"github.com/subconscious-labs/deepseek-mcp/internal/counter"
 	"github.com/subconscious-labs/deepseek-mcp/internal/deepseek"
 	"github.com/subconscious-labs/deepseek-mcp/internal/logging"
 	"github.com/subconscious-labs/deepseek-mcp/internal/mcp"
@@ -28,7 +29,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Информационные режимы — до создания клиента, до slog.
 	if cfg.PrintVersion {
 		fmt.Printf("deepseek-mcp %s (commit %s, built %s)\n", version, commit, buildTime)
 		return
@@ -46,7 +46,20 @@ func main() {
 		return
 	}
 
-	client := deepseek.NewClient(cfg)
+	// Counter создаётся всегда — даже если лимит 0, он ведёт статистику.
+	ctr, err := counter.New(cfg.StateDir, cfg.DailyRequestLimit)
+	if err != nil {
+		logger.Error("counter init failed", "state_dir", cfg.StateDir, "error", err)
+		os.Exit(1)
+	}
+	snap := ctr.Snapshot()
+	logger.Info("counter loaded",
+		"date", snap.Date,
+		"used_today", snap.SearchRequests+snap.FetchRequests,
+		"daily_limit", cfg.DailyRequestLimit,
+	)
+
+	client := deepseek.NewClientWithOptions(cfg, deepseek.WithCounter(ctr))
 	server := mcp.NewServer(client, cfg, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -67,11 +80,28 @@ func runCheck(cfg config.Config, logger *slog.Logger) {
 		"search_qps", cfg.SearchQPS,
 		"fetch_qps", cfg.FetchQPS,
 		"allow_private_ips", cfg.AllowPrivateIPs,
+		"daily_request_limit", cfg.DailyRequestLimit,
+		"state_dir", cfg.StateDir,
 	)
 	if cfg.APIKey == "" {
 		logger.Warn("DEEPSEEK_API_KEY not set; config is valid but live calls will fail")
 	} else {
 		logger.Info("DEEPSEEK_API_KEY present; live API test not performed by --check")
+	}
+
+	if cfg.DailyRequestLimit > 0 {
+		ctr, err := counter.New(cfg.StateDir, cfg.DailyRequestLimit)
+		if err != nil {
+			logger.Error("counter init failed", "error", err)
+			return
+		}
+		snap := ctr.Snapshot()
+		logger.Info("counter state",
+			"date", snap.Date,
+			"search_requests", snap.SearchRequests,
+			"fetch_requests", snap.FetchRequests,
+			"estimated_cost_usd", snap.EstimatedCostUSD,
+		)
 	}
 }
 

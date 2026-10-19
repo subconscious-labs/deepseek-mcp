@@ -1,0 +1,27 @@
+services:
+  deepseek-mcp:
+    image: ghcr.io/subconscious-labs/deepseek-mcp:latest
+    container_name: deepseek-mcp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
+      MCP_HTTP_TOKEN: ${MCP_HTTP_TOKEN:?set MCP_HTTP_TOKEN in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      DAILY_REQUEST_LIMIT: ${DAILY_REQUEST_LIMIT:-200}
+      SEARCH_QPS: ${SEARCH_QPS:-4}
+      FETCH_QPS: ${FETCH_QPS:-4}
+      ALLOW_PRIVATE_IPS: "false"
+    volumes:
+      - deepseek-state:/var/lib/deepseek-mcp
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8765/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  deepseek-state:

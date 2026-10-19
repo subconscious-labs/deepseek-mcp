@@ -76,6 +76,8 @@ func mapDeepSeekError(err error, op string) (code, detail string, retryAfter int
 			return "timeout", apiErr.Detail, 0
 		case deepseek.ErrorInvalidResponse:
 			return "internal_error", "invalid response from DeepSeek", 0
+		case deepseek.ErrorDailyLimit:
+			return "daily_limit_exceeded", apiErr.Detail, apiErr.RetryAfter
 		case deepseek.ErrorInvalidRequest:
 			if op == "search" {
 				return "invalid_query", apiErr.Detail, 0

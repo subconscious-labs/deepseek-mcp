@@ -20,6 +20,7 @@ const (
 	ErrorNetwork
 	ErrorTimeout
 	ErrorInvalidResponse
+	ErrorDailyLimit
 )
 
 // APIError is the single error type returned by Client. Use errors.As.

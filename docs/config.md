@@ -20,18 +20,38 @@ All settings are configurable via environment variables and CLI flags. **Flags o
 | `ALLOW_PRIVATE_IPS` | `false` | Disables SSRF protection. Local testing only. |
 | `MAX_RESPONSE_BYTES` | `102400` | Hard cap on tool response size (bytes). Responses larger than this are truncated with `_results_dropped` / `_truncated` markers. |
 
-### Reserved — accepted by config, not yet used (v0.2)
+### Implemented in v0.2
 
-| Variable | Default | Planned use |
+| Variable | Default | Description |
 |---|---|---|
-| `MCP_TRANSPORT` | `stdio` | `stdio` or `http`. HTTP not implemented in v0.1. |
+| `MCP_TRANSPORT` | `stdio` | `stdio` or `http`. |
 | `MCP_HTTP_ADDR` | `:8765` | Listen address for HTTP transport. |
-| `MCP_HTTP_TOKEN` | — | Bearer token for HTTP transport. |
-| `MCP_HTTP_ALLOW_INSECURE` | `false` | Allow HTTP transport without a token. |
-| `DAILY_REQUEST_LIMIT` | `0` | Hard cap on successful requests per UTC day. 0 = unlimited. |
-| `STATE_DIR` | `$XDG_STATE_HOME/deepseek-mcp` | Where `counter.json` will live. |
+| `MCP_HTTP_TOKEN` | — | Bearer token for HTTP transport. Required unless `MCP_HTTP_ALLOW_INSECURE=true`. |
+| `MCP_HTTP_ALLOW_INSECURE` | `false` | Allow HTTP transport without a token. Logs a warning. |
+| `DAILY_REQUEST_LIMIT` | `0` | Hard cap on successful requests per UTC day (search + fetch combined). 0 = unlimited. Exceeding the limit returns `daily_limit_exceeded` with `retry_after_sec` until UTC midnight. |
+| `STATE_DIR` | `$XDG_STATE_HOME/deepseek-mcp` | Where `counter.json` and `counter.archive.jsonl` live. Must be writable. |
 
 Setting them today is harmless: `--check` will echo them back, but they have no runtime effect until v0.2.
+
+### Counter state
+
+`deepseek-mcp` writes `$STATE_DIR/counter.json`:
+
+```json
+{
+  "date": "2026-10-19",
+  "search_requests": 42,
+  "fetch_requests": 18,
+  "estimated_cost_usd": 0.045
+}
+```
+
+At UTC midnight the file is rotated: the old snapshot is appended to
+`counter.archive.jsonl`, and `counter.json` starts fresh. If the file is
+corrupted (kill -9 mid-write), the server silently starts from zero — the
+service does not go down because of one bad file.
+
+`--check` prints the current snapshot without making network calls.
 
 ## CLI flags
 

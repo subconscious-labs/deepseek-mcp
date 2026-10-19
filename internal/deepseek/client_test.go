@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/subconscious-labs/deepseek-mcp/internal/config"
+	"github.com/subconscious-labs/deepseek-mcp/internal/counter"
 )
 
 func testConfig(baseURL string) config.Config {
@@ -116,8 +117,6 @@ func TestSearch_NoRetryOn400(t *testing.T) {
 	assert.EqualValues(t, 1, atomic.LoadInt32(&attempts))
 }
 
-// newTestClient без WithMaxBackoff — Retry-After=1 должен реально ждаться,
-// иначе тест теряет смысл.
 func TestSearch_RetryAfterHonored(t *testing.T) {
 	var attempts int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -196,4 +195,149 @@ func TestFetch_RetrySameAsSearch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "t", resp.Title)
 	assert.EqualValues(t, 2, atomic.LoadInt32(&attempts))
+}
+
+// --- Counter integration ---
+
+// TestSearch_DailyLimitBlocksBeforeNetwork — при исчерпанном лимите клиент
+// возвращает ErrorDailyLimit, НЕ делая HTTP-запрос к DeepSeek.
+func TestSearch_DailyLimitBlocksBeforeNetwork(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		t.Errorf("DeepSeek must not be called when daily limit is reached")
+	}))
+	defer srv.Close()
+
+	ctr, err := counter.New(t.TempDir(), 1)
+	require.NoError(t, err)
+	require.NoError(t, ctr.Incr("search")) // исчерпали лимит: 1/1
+
+	c := NewClientWithOptions(testConfig(srv.URL), WithCounter(ctr))
+
+	_, err = c.Search(context.Background(), SearchRequest{Query: "q"})
+	require.Error(t, err)
+
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, ErrorDailyLimit, apiErr.Kind)
+	assert.Greater(t, apiErr.RetryAfter, 0, "retry_after должен указывать до UTC-полуночи")
+	assert.EqualValues(t, 0, atomic.LoadInt32(&hits), "DeepSeek не должен был вызываться")
+	assert.Equal(t, 1, ctr.Used(), "счётчик не должен меняться при отказе")
+}
+
+// TestFetch_DailyLimitBlocksBeforeNetwork — то же для fetch.
+func TestFetch_DailyLimitBlocksBeforeNetwork(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		t.Errorf("DeepSeek must not be called when daily limit is reached")
+	}))
+	defer srv.Close()
+
+	ctr, err := counter.New(t.TempDir(), 1)
+	require.NoError(t, err)
+	require.NoError(t, ctr.Incr("fetch"))
+
+	c := NewClientWithOptions(testConfig(srv.URL), WithCounter(ctr))
+
+	_, err = c.Fetch(context.Background(), FetchRequest{URL: "https://example.com"})
+	require.Error(t, err)
+
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, ErrorDailyLimit, apiErr.Kind)
+	assert.EqualValues(t, 0, atomic.LoadInt32(&hits))
+}
+
+// TestSearch_CounterNotIncrementedOnError — 401 не должен съедать дневной лимит.
+func TestSearch_CounterNotIncrementedOnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	ctr, err := counter.New(t.TempDir(), 0)
+	require.NoError(t, err)
+
+	c := NewClientWithOptions(testConfig(srv.URL), WithCounter(ctr))
+
+	_, err = c.Search(context.Background(), SearchRequest{Query: "q"})
+	require.Error(t, err)
+	assert.Equal(t, 0, ctr.Used(), "неуспешный запрос не должен увеличивать счётчик")
+}
+
+// TestSearch_CounterIncrementedOnSuccess — успешный ответ даёт +1 в search.
+func TestSearch_CounterIncrementedOnSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	ctr, err := counter.New(t.TempDir(), 0)
+	require.NoError(t, err)
+
+	c := NewClientWithOptions(testConfig(srv.URL), WithCounter(ctr))
+
+	_, err = c.Search(context.Background(), SearchRequest{Query: "q"})
+	require.NoError(t, err)
+
+	snap := ctr.Snapshot()
+	assert.Equal(t, 1, snap.SearchRequests)
+	assert.Equal(t, 0, snap.FetchRequests)
+	assert.InDelta(t, 0.00075, snap.EstimatedCostUSD, 1e-9)
+}
+
+// TestFetch_CounterIncrementedOnSuccess — успешный ответ даёт +1 в fetch.
+func TestFetch_CounterIncrementedOnSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"title":"t","content":"c"}`))
+	}))
+	defer srv.Close()
+
+	ctr, err := counter.New(t.TempDir(), 0)
+	require.NoError(t, err)
+
+	c := NewClientWithOptions(testConfig(srv.URL), WithCounter(ctr))
+
+	_, err = c.Fetch(context.Background(), FetchRequest{URL: "https://example.com"})
+	require.NoError(t, err)
+
+	snap := ctr.Snapshot()
+	assert.Equal(t, 0, snap.SearchRequests)
+	assert.Equal(t, 1, snap.FetchRequests)
+}
+
+// TestSearch_CounterIncrementedOnceAfterRetry — 429→429→200: счётчик +1,
+// а не +3. Три HTTP-попытки — один биллинг-запрос.
+func TestSearch_CounterIncrementedOnceAfterRetry(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n < 3 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	ctr, err := counter.New(t.TempDir(), 0)
+	require.NoError(t, err)
+
+	c := NewClientWithOptions(testConfig(srv.URL),
+		WithCounter(ctr),
+		WithBackoffBase(time.Millisecond),
+		WithMaxBackoff(10*time.Millisecond),
+	)
+
+	_, err = c.Search(context.Background(), SearchRequest{Query: "q"})
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 3, atomic.LoadInt32(&attempts), "должно быть 3 HTTP-попытки")
+	assert.Equal(t, 1, ctr.Used(), "счётчик должен вырасти ровно на 1, несмотря на retry")
 }

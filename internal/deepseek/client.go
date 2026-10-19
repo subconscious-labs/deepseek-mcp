@@ -11,6 +11,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/subconscious-labs/deepseek-mcp/internal/config"
+	"github.com/subconscious-labs/deepseek-mcp/internal/counter"
 )
 
 type Client struct {
@@ -20,7 +21,8 @@ type Client struct {
 	searchRL    *rate.Limiter
 	fetchRL     *rate.Limiter
 	backoffBase time.Duration
-	maxBackoff  time.Duration // 0 = без ограничения сверху
+	maxBackoff  time.Duration
+	counter     *counter.Counter
 }
 
 type Option func(*Client)
@@ -31,6 +33,10 @@ func WithBackoffBase(d time.Duration) Option {
 
 func WithMaxBackoff(d time.Duration) Option {
 	return func(c *Client) { c.maxBackoff = d }
+}
+
+func WithCounter(c *counter.Counter) Option {
+	return func(cl *Client) { cl.counter = c }
 }
 
 func NewClient(cfg config.Config) *Client {
@@ -58,21 +64,47 @@ func NewClientWithOptions(cfg config.Config, opts ...Option) *Client {
 }
 
 func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
+	if c.counter != nil {
+		if retryAfter, ok := c.counter.Check(); !ok {
+			return nil, &APIError{
+				Op: "search", Kind: ErrorDailyLimit,
+				Detail:     "daily request limit reached",
+				RetryAfter: retryAfter,
+			}
+		}
+	}
 	if err := c.searchRL.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
-	return retry(ctx, c, func() (*SearchResponse, error) {
+	resp, err := retry(ctx, c, func() (*SearchResponse, error) {
 		return c.doSearch(ctx, req)
 	}, 3)
+	if err == nil && c.counter != nil {
+		_ = c.counter.Incr("search")
+	}
+	return resp, err
 }
 
 func (c *Client) Fetch(ctx context.Context, req FetchRequest) (*FetchResponse, error) {
+	if c.counter != nil {
+		if retryAfter, ok := c.counter.Check(); !ok {
+			return nil, &APIError{
+				Op: "fetch", Kind: ErrorDailyLimit,
+				Detail:     "daily request limit reached",
+				RetryAfter: retryAfter,
+			}
+		}
+	}
 	if err := c.fetchRL.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
-	return retry(ctx, c, func() (*FetchResponse, error) {
+	resp, err := retry(ctx, c, func() (*FetchResponse, error) {
 		return c.doFetch(ctx, req)
 	}, 3)
+	if err == nil && c.counter != nil {
+		_ = c.counter.Incr("fetch")
+	}
+	return resp, err
 }
 
 func retry[T any](ctx context.Context, c *Client, fn func() (*T, error), maxAttempts int) (*T, error) {

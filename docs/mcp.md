@@ -8,7 +8,13 @@ Client spawns `deepseek-mcp` and speaks JSON-RPC over stdin/stdout. `slog` write
 
 ### streamable HTTP
 
-**Not implemented in v0.1.** Planned for v0.2 with `--transport http --addr :8765 --http-token <secret>`. See `docs/config.md` for reserved fields.
+`--transport http --addr :8765 --http-token <secret>`. Endpoint — `POST /mcp`.
+`Authorization: Bearer <secret>` обязателен, если не задан
+`--http-allow-insecure` (тогда в лог пишется warning на каждый запрос).
+
+`GET /healthz` — публичный liveness probe, отвечает `200 ok` без auth.
+Предназначен для Docker `HEALTHCHECK` и внешних балансировщиков; никакой
+информации о состоянии, кроме факта «жив», не отдаёт.
 
 ## Tools
 
@@ -158,8 +164,14 @@ Every tool response is either a success payload or:
 | `timeout` | Per-request deadline exceeded | Do not retry |
 | `response_too_large` | > `MAX_RESPONSE_BYTES` even after truncation | Do not retry |
 | `internal_error` | Unexpected | Report, do not retry |
+| `daily_limit_exceeded` | Local `DAILY_REQUEST_LIMIT` exhausted | Wait `retry_after_sec` (until UTC midnight) or raise the limit |
 
 **Retries happen inside `deepseek-mcp`.** The model receives the final answer after all attempts; it must not retry on its own.
+
+`daily_limit_exceeded` — это **наш** лимит, а не 429 от DeepSeek. Он
+срабатывает до сетевого вызова, поэтому модель не тратит деньги на
+запрос, который всё равно был бы отклонён. `rate_limited` приходит от
+DeepSeek и означает, что лимит их аккаунта исчерпан (5 QPS на аккаунт).
 
 ## Response size limits
 
