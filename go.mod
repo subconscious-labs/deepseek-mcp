@@ -1,12 +1,12 @@
 module github.com/subconscious-labs/deepseek-mcp
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/stretchr/testify v1.12.1
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 )
 
 require (
