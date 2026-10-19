@@ -14,36 +14,54 @@ import (
 )
 
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
-	searchRL   *rate.Limiter
-	fetchRL    *rate.Limiter
+	baseURL     string
+	apiKey      string
+	httpClient  *http.Client
+	searchRL    *rate.Limiter
+	fetchRL     *rate.Limiter
+	backoffBase time.Duration
+	maxBackoff  time.Duration // 0 = без ограничения сверху
+}
+
+type Option func(*Client)
+
+func WithBackoffBase(d time.Duration) Option {
+	return func(c *Client) { c.backoffBase = d }
+}
+
+func WithMaxBackoff(d time.Duration) Option {
+	return func(c *Client) { c.maxBackoff = d }
 }
 
 func NewClient(cfg config.Config) *Client {
+	return NewClientWithOptions(cfg)
+}
+
+func NewClientWithOptions(cfg config.Config, opts ...Option) *Client {
 	transport := &http.Transport{
 		MaxIdleConns:        20,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 	}
-	return &Client{
-		baseURL: cfg.APIBase,
-		apiKey:  cfg.APIKey,
-		httpClient: &http.Client{
-			Transport: transport,
-			Timeout:   90 * time.Second,
-		},
-		searchRL: rate.NewLimiter(rate.Limit(cfg.SearchQPS), int(cfg.SearchQPS)),
-		fetchRL:  rate.NewLimiter(rate.Limit(cfg.FetchQPS), int(cfg.FetchQPS)),
+	c := &Client{
+		baseURL:     cfg.APIBase,
+		apiKey:      cfg.APIKey,
+		httpClient:  &http.Client{Transport: transport, Timeout: 90 * time.Second},
+		searchRL:    rate.NewLimiter(rate.Limit(cfg.SearchQPS), int(cfg.SearchQPS)),
+		fetchRL:     rate.NewLimiter(rate.Limit(cfg.FetchQPS), int(cfg.FetchQPS)),
+		backoffBase: time.Second,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
 	if err := c.searchRL.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
-	return retry(ctx, func() (*SearchResponse, error) {
+	return retry(ctx, c, func() (*SearchResponse, error) {
 		return c.doSearch(ctx, req)
 	}, 3)
 }
@@ -52,14 +70,12 @@ func (c *Client) Fetch(ctx context.Context, req FetchRequest) (*FetchResponse, e
 	if err := c.fetchRL.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
-	return retry(ctx, func() (*FetchResponse, error) {
+	return retry(ctx, c, func() (*FetchResponse, error) {
 		return c.doFetch(ctx, req)
 	}, 3)
 }
 
-// retry — generic retry с exponential backoff + jitter.
-// Honours Retry-After when present on an APIError.
-func retry[T any](ctx context.Context, fn func() (*T, error), maxAttempts int) (*T, error) {
+func retry[T any](ctx context.Context, c *Client, fn func() (*T, error), maxAttempts int) (*T, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		result, err := fn()
@@ -70,7 +86,7 @@ func retry[T any](ctx context.Context, fn func() (*T, error), maxAttempts int) (
 		if !isRetryable(err) || attempt == maxAttempts {
 			break
 		}
-		sleep := backoffDuration(attempt, err)
+		sleep := c.backoffDuration(attempt, err)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -80,8 +96,8 @@ func retry[T any](ctx context.Context, fn func() (*T, error), maxAttempts int) (
 	return nil, lastErr
 }
 
-func backoffDuration(attempt int, err error) time.Duration {
-	base := time.Duration(1<<uint(attempt-1)) * time.Second
+func (c *Client) backoffDuration(attempt int, err error) time.Duration {
+	base := c.backoffBase * time.Duration(1<<uint(attempt-1))
 	jitter := 0.5 + rand.Float64()*0.5
 	d := time.Duration(float64(base) * jitter)
 
@@ -90,6 +106,9 @@ func backoffDuration(attempt int, err error) time.Duration {
 		if ra := time.Duration(apiErr.RetryAfter) * time.Second; ra > d {
 			d = ra
 		}
+	}
+	if c.maxBackoff > 0 && d > c.maxBackoff {
+		d = c.maxBackoff
 	}
 	return d
 }
